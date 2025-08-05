@@ -78,6 +78,7 @@ class FixedAIEmailParser {
       ]
     };
 
+
     // Email type detection patterns
     this.emailTypePatterns = {
       registration: ['registration', 'last date', 'eligible', 'apply'],
@@ -271,27 +272,58 @@ class FixedAIEmailParser {
    * Parse registration emails and schedule reminders
    */
   parseRegistrationEmail(subject, body, messageId) {
-    const lastDateText = this.extractWithPattern(body, this.fieldPatterns.lastDate);
-    const companyName = this.extractCompanyFromSubject(subject) || this.extractCompanyFromBody(body);
-    const deadline = parseDeadlineDate(lastDateText);
+  // Normalize spaces including non-breaking ones, and trim
+  let cleanBody = body.replace(/\u00A0/g, ' ').replace(/\r\n/g, '\n').trim();
 
-    if (deadline && deadline > new Date()) {
-      scheduleReminder(messageId, companyName, deadline);
+  // Try your usual label-based extraction first
+  let lastDateText = this.extractWithPattern(cleanBody, this.fieldPatterns.lastDate);
+
+  // If too long, empty or suspicious, try to find date-like substrings anywhere
+  if (!lastDateText || lastDateText.toLowerCase() === 'not mentioned' || lastDateText.length > 80) {
+    let dateCandidates = [];
+    const datePattern = /(\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}|\d{1,2}(?:st|nd|rd|th)?\s+\w+\s+\d{4})(?:\s*\(?\d{1,2}:?\d{2}\s*(?:am|pm)?\)?\s*)?/gi;
+    let match;
+    while ((match = datePattern.exec(cleanBody)) !== null) {
+      dateCandidates.push(match[0]);
     }
+    const keywords = ['register', 'deadline', 'last date', 'ends', 'before', 'due'];
+    let chosenDate = null;
+    let minIndex = cleanBody.length;
 
-    return {
-      company: companyName,
-      category: this.extractCategory(subject, body),
-      role: this.inferRole(subject, body),
-      ctc: this.extractCTC(body),
-      stipend: this.extractStipend(body),
-      visitDate: this.extractWithPattern(body, this.fieldPatterns.visitDate),
-      lastDate: lastDateText,
-      eligibleBranches: this.extractEligibleBranches(body),
-      eligibilityCriteria: this.extractEligibilityCriteria(body),
-      location: this.extractWithPattern(body, this.fieldPatterns.location)
-    };
+    for (const candidate of dateCandidates) {
+      const idx = cleanBody.indexOf(candidate);
+      const window = cleanBody.substring(Math.max(0, idx - 50), idx + candidate.length + 50).toLowerCase();
+      if (keywords.some(kw => window.includes(kw)) && idx < minIndex) {
+        minIndex = idx;
+        chosenDate = candidate;
+      }
+    }
+    lastDateText = chosenDate || (dateCandidates.length > 0 ? dateCandidates[0] : 'Not mentioned');
   }
+
+  // Defensive cleanup of trailing dots and multi-line
+  lastDateText = lastDateText.trim().split('\n')[0].split(/[.]/)[0].trim();
+
+  const companyName = this.extractCompanyFromSubject(subject) || this.extractCompanyFromBody(cleanBody);
+  const deadline = parseDeadlineDate(lastDateText);
+
+  if (deadline && deadline > new Date()) {
+    scheduleReminder(messageId, companyName, deadline);
+  }
+
+  return {
+    company: companyName,
+    category: this.extractCategory(subject, body),
+    role: this.inferRole(subject, body),
+    ctc: this.extractCTC(cleanBody),
+    stipend: this.extractStipend(cleanBody),
+    visitDate: this.extractWithPattern(cleanBody, this.fieldPatterns.visitDate),
+    lastDate: lastDateText,
+    eligibleBranches: this.extractEligibleBranches(cleanBody),
+    eligibilityCriteria: this.extractEligibilityCriteria(cleanBody),
+    location: this.extractWithPattern(cleanBody, this.fieldPatterns.location)
+  };
+}
 
   /**
    * Parse general emails
@@ -367,9 +399,9 @@ class FixedAIEmailParser {
    */
   extractCTC(body) {
     // First try to find CTC section
-    const ctcMatch = body.match(/ctc[:\s]*\n?\s*([\s\S]*?)(?=stipend|last date|website|eligible|$)/gi);
-    if (ctcMatch && ctcMatch[0]) {
-      let ctcText = ctcMatch[0].replace(/ctc[:\s]*/gi, '').trim();
+    const ctcMatch = body.match(/ctc[:\s]*\n?\s*([\s\S]*?)(?=stipend|last date|website|eligible|$)/i);
+    if (ctcMatch && ctcMatch[1]) {
+      let ctcText = ctcMatch[1].trim();
       
       // Clean up the text
       ctcText = ctcText
@@ -377,21 +409,11 @@ class FixedAIEmailParser {
         .replace(/\s+/g, ' ')
         .trim();
 
-      // Stop at certain keywords
-      const stopWords = ['stipend', 'last date', 'website', 'eligible'];
-      for (let stopWord of stopWords) {
-        const stopIndex = ctcText.toLowerCase().indexOf(stopWord);
-        if (stopIndex > 0) {
-          ctcText = ctcText.substring(0, stopIndex).trim();
-          break;
-        }
-      }
-
       return ctcText.length > 200 ? ctcText.substring(0, 200) + '...' : ctcText;
     }
 
     // Fallback: look for LPA mentions
-    const lpaMatch = body.match(/(\d+(?:\.\d+)?)\s*lpa/gi);
+    const lpaMatch = body.match(/(\d+(?:\.\d+)?)\s*lpa/i);
     if (lpaMatch) {
       return lpaMatch.join(', ');
     }
@@ -403,25 +425,15 @@ class FixedAIEmailParser {
    * Extract stipend with better parsing
    */
   extractStipend(body) {
-    const stipendMatch = body.match(/stipend[:\s]*\n?\s*([\s\S]*?)(?=last date|website|eligible|ctc|$)/gi);
-    if (stipendMatch && stipendMatch[0]) {
-      let stipendText = stipendMatch[0].replace(/stipend[:\s]*/gi, '').trim();
+    const stipendMatch = body.match(/stipend[:\s]*\n?\s*([\s\S]*?)(?=last date|website|eligible|ctc|$)/i);
+    if (stipendMatch && stipendMatch[1]) {
+      let stipendText = stipendMatch[1].trim();
       
       // Clean up the text
       stipendText = stipendText
         .replace(/\n+/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
-
-      // Stop at certain keywords
-      const stopWords = ['last date', 'website', 'eligible', 'ctc'];
-      for (let stopWord of stopWords) {
-        const stopIndex = stipendText.toLowerCase().indexOf(stopWord);
-        if (stopIndex > 0) {
-          stipendText = stipendText.substring(0, stopIndex).trim();
-          break;
-        }
-      }
 
       return stipendText.length > 150 ? stipendText.substring(0, 150) + '...' : stipendText;
     }
@@ -433,21 +445,15 @@ class FixedAIEmailParser {
    * Extract eligible branches with proper formatting
    */
   extractEligibleBranches(body) {
-    const branchesMatch = body.match(/eligible\s+branches[:\s]*\n?\s*([\s\S]*?)(?=eligibility criteria|ctc|stipend|$)/gi);
-    if (branchesMatch && branchesMatch[0]) {
-      let branchesText = branchesMatch[0].replace(/eligible\s+branches[:\s]*/gi, '').trim();
+    const branchesMatch = body.match(/eligible\s+branches[:\s]*\n?\s*([\s\S]*?)(?=eligibility criteria|ctc|stipend|$)/i);
+    if (branchesMatch && branchesMatch[1]) {
+      let branchesText = branchesMatch[1].trim();
       
       // Clean up formatting
       branchesText = branchesText
         .replace(/\*/g, '')
         .replace(/\n+/g, '\n')
         .trim();
-
-      // Stop at eligibility criteria
-      const criteriaIndex = branchesText.toLowerCase().indexOf('eligibility criteria');
-      if (criteriaIndex > 0) {
-        branchesText = branchesText.substring(0, criteriaIndex).trim();
-      }
 
       return branchesText.length > 200 ? branchesText.substring(0, 200) + '...' : branchesText;
     }
@@ -459,25 +465,15 @@ class FixedAIEmailParser {
    * Extract eligibility criteria with proper formatting
    */
   extractEligibilityCriteria(body) {
-    const criteriaMatch = body.match(/eligibility\s+criteria[:\s]*\n?\s*([\s\S]*?)(?=ctc|stipend|website|$)/gi);
-    if (criteriaMatch && criteriaMatch[0]) {
-      let criteriaText = criteriaMatch[0].replace(/eligibility\s+criteria[:\s]*/gi, '').trim();
+    const criteriaMatch = body.match(/eligibility\s+criteria[:\s]*\n?\s*([\s\S]*?)(?=ctc|stipend|website|$)/i);
+    if (criteriaMatch && criteriaMatch[1]) {
+      let criteriaText = criteriaMatch[1].trim();
       
       // Clean up formatting
       criteriaText = criteriaText
         .replace(/\*/g, '')
         .replace(/\n+/g, '\n')
         .trim();
-
-      // Stop at certain keywords
-      const stopWords = ['ctc', 'stipend', 'website', 'last date'];
-      for (let stopWord of stopWords) {
-        const stopIndex = criteriaText.toLowerCase().indexOf(stopWord);
-        if (stopIndex > 0) {
-          criteriaText = criteriaText.substring(0, stopIndex).trim();
-          break;
-        }
-      }
 
       return criteriaText.length > 300 ? criteriaText.substring(0, 300) + '...' : criteriaText;
     }
@@ -586,6 +582,7 @@ class FixedAIEmailParser {
   }
 }
 
+
 // Initialize the fixed parser
 const fixedParser = new FixedAIEmailParser();
 
@@ -661,6 +658,21 @@ function isVITCDCPlacementEmail(message) {
   }
 }
 
+function escapeForTelegramHTML(text) {
+  if (!text) return '';
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\[/g, "&#91;")
+    .replace(/\]/g, "&#93;")
+    .replace(/\(/g, "&#40;")
+    .replace(/\)/g, "&#41;")
+    .replace(/_/g, "&#95;")
+    .replace(/\*/g, "&#42;")
+    .replace(/`/g, "&#96;");
+}
+
 /**
  * Enhanced notification formatter with emojis and better layout
  */
@@ -672,25 +684,25 @@ function formatVITCDCNotification(info) {
   // Handle different email types properly
   if (info.emailType === 'TEST_NOTIFICATION') {
     message = `🚨 *TEST ALERT* 🚨\n\n`;
-    message += `✍️ A test has been scheduled for <b>${info.company}</b>.\n\n`;
+    message += `✍️ A test has been scheduled for <b>${escapeForTelegramHTML(info.company)}</b>.\n\n`;
     if (info.testDate && info.testDate !== 'Not mentioned') {
-      message += `🗓️ <b>Test Date:</b> ${info.testDate}\n`;
+      message += `🗓️ <b>Test Date:</b> ${escapeForTelegramHTML(info.testDate)}\n`;
     }
     if (info.testTime && info.testTime !== 'Not mentioned') {
-      message += `🕐 <b>Time:</b> ${info.testTime}\n`;
+      message += `🕐 <b>Time:</b> ${escapeForTelegramHTML(info.testTime)}\n`;
     }
     if (info.venue && info.venue !== 'Not mentioned') {
-      message += `📍 <b>Venue:</b> ${info.venue}\n`;
+      message += `📍 <b>Venue:</b> ${escapeForTelegramHTML(info.venue)}\n`;
     }
     message += `\n➡️ Shortlisted students should check their email for full details.`;
 
   } else if (info.emailType === 'CONGRATULATIONS') {
     message = `🎉🥳 *CONGRATULATIONS!* 🥳🎉\n\n`;
-    message += `We have a new selection list from <b>${info.company}</b>! ${categoryIcon}\n\n`;
+    message += `We have a new selection list from <b>${escapeForTelegramHTML(info.company)}</b>! ${categoryIcon}\n\n`;
     message += `🏆 <b>Status:</b> <b>SELECTED!</b>\n\n`;
     
     if (info.selectedStudents && info.selectedStudents !== 'Check email for selection details' && info.selectedStudents !== 'Check email for complete selection list') {
-      message += `🌟 <b>Selected Students:</b>\n<code>${info.selectedStudents}</code>\n\n`;
+      message += `🌟 <b>Selected Students:</b>\n<code>${escapeForTelegramHTML(info.selectedStudents)}</code>\n\n`;
     } else {
       message += `📋 Check your email for the complete list of selected students.\n\n`;
     }
@@ -699,43 +711,43 @@ function formatVITCDCNotification(info) {
   } else if (info.emailType === 'REGISTRATION') {
     const urgencyIcon = isUrgent(info.lastDate) ? '🚨' : '📢';
     message = `${urgencyIcon} *NEW PLACEMENT OPPORTUNITY* ${urgencyIcon}\n${separator}`;
-    message += `${categoryIcon} <b>Company:</b> <b>${info.company}</b>\n`;
-    message += `💼 <b>Role:</b> ${info.role}\n`;
-    message += `📊 <b>Category:</b> ${info.category.toUpperCase()}\n\n`;
+    message += `${categoryIcon} <b>Company:</b> <b>${escapeForTelegramHTML(info.company)}</b>\n`;
+    message += `💼 <b>Role:</b> ${escapeForTelegramHTML(info.role)}\n`;
+    message += `📊 <b>Category:</b> ${escapeForTelegramHTML(info.category.toUpperCase())}\n\n`;
 
     if (info.ctc && info.ctc !== 'Not mentioned') {
-      message += `💰 <b>CTC:</b> ${info.ctc}\n`;
+      message += `💰 <b>CTC:</b> ${escapeForTelegramHTML(info.ctc)}\n`;
     }
     if (info.stipend && info.stipend !== 'Not mentioned') {
-      message += `💵 <b>Stipend:</b> ${info.stipend}\n`;
+      message += `💵 <b>Stipend:</b> ${escapeForTelegramHTML(info.stipend)}\n`;
     }
     if (info.location && info.location !== 'Not mentioned') {
-      message += `📍 <b>Location:</b> ${info.location}\n`;
+      message += `📍 <b>Location:</b> ${escapeForTelegramHTML(info.location)}\n`;
     }
     if (info.visitDate && info.visitDate !== 'Not mentioned') {
-      message += `🗓️ <b>Visit Date:</b> ${info.visitDate}\n`;
+      message += `🗓️ <b>Visit Date:</b> ${escapeForTelegramHTML(info.visitDate)}\n`;
     }
     if (info.lastDate && info.lastDate !== 'Not mentioned') {
-      message += `⏰ <b>Registration Deadline:</b> <b>${info.lastDate}</b>\n`;
+      message += `⏰ <b>Registration Deadline:</b> <b>${escapeForTelegramHTML(info.lastDate)}</b>\n`;
     }
     message += separator;
 
     if (info.eligibleBranches && info.eligibleBranches !== 'All eligible branches' && info.eligibleBranches !== 'Check email content') {
-      message += `🎓 <b>Eligible Branches:</b>\n<code>${info.eligibleBranches}</code>\n\n`;
+      message += `🎓 <b>Eligible Branches:</b>\n<code>${escapeForTelegramHTML(info.eligibleBranches)}</code>\n\n`;
     }
     if (info.eligibilityCriteria && info.eligibilityCriteria !== 'Standard eligibility criteria apply' && info.eligibilityCriteria !== 'Check email content') {
-      message += `📋 <b>Eligibility:</b>\n<code>${info.eligibilityCriteria}</code>\n\n`;
+      message += `📋 <b>Eligibility:</b>\n<code>${escapeForTelegramHTML(info.eligibilityCriteria)}</code>\n\n`;
     }
     message += `➡️ All interested and eligible students must register on the portal before the deadline.`;
 
   } else { // General Update
     message = `ℹ️ *PLACEMENT UPDATE* ℹ️\n\n`;
-    message += `🏢 <b>Company:</b> <b>${info.company}</b>\n\n`;
-    message += `Just a heads-up about an update regarding ${info.company}. Please check your email for more details.`;
+    message += `🏢 <b>Company:</b> <b>${escapeForTelegramHTML(info.company)}</b>\n\n`;
+    message += `Just a heads-up about an update regarding ${escapeForTelegramHTML(info.company)}. Please check your email for more details.`;
   }
 
   message += `\n${separator}`;
-  message += `📧 <b>Subject:</b> <i>${info.subject}</i>\n`;
+  message += `📧 <b>Subject:</b> <i>${escapeForTelegramHTML(info.subject)}</i>\n`;
   message += `🕐 <b>Received:</b> ${Utilities.formatDate(info.receivedTime, Session.getScriptTimeZone(), 'dd/MM/yyyy HH:mm')}`;
 
   if (info.error) {
@@ -746,11 +758,27 @@ function formatVITCDCNotification(info) {
 }
 
 /**
+ * Utility function to clear the daily activity log.
+ */
+function clearActivityLog() {
+  PropertiesService.getScriptProperties().deleteProperty('DAILY_ACTIVITY_LOG');
+  console.log('✅ Successfully cleared the daily activity log.');
+}
+
+/**
  * Utility function to clear the log of processed message IDs.
  */
 function clearProcessedIds() {
   PropertiesService.getScriptProperties().deleteProperty('PROCESSED_MESSAGE_IDS');
   console.log('✅ Successfully cleared the processed message ID log.');
+}
+
+/**
+ * Utility function to clear the log of reminder IDs.
+ */
+function clearPendingReminders() {
+  PropertiesService.getScriptProperties().deleteProperty('PENDING_REMINDERS');
+  console.log('✅ Successfully cleared the pending reminders log.');
 }
 
 /**
@@ -840,35 +868,53 @@ function parseDeadlineDate(dateString) {
   if (!dateString) return null;
 
   try {
-    const text = dateString.toLowerCase();
-    const now = new Date();
-    
-    // Pattern for "ddth Month yyyy (hh.mm am/pm)" or "ddth month yyyy hh"
-    const pattern = /(\d{1,2})(?:st|nd|rd|th)?\s+(\w+)\s+(\d{4})\s*(?:[\(\s]*(\d{1,2})[:.]?(\d{2})?\s*(am|pm)?)?/;
-    const match = text.match(pattern);
-    
-    if (!match) return null;
+    const text = dateString.toLowerCase().trim();
 
-    const day = parseInt(match[1]);
-    const monthName = match[2];
-    const year = parseInt(match[3]);
-    let hour = match[4] ? parseInt(match[4]) : 23; // Default to end of day if no time
-    let minute = match[5] ? parseInt(match[5]) : 59;
-    const ampm = match[6];
-    
-    const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-    const monthIndex = monthNames.findIndex(m => monthName.startsWith(m));
+    // 1) Try to parse verbose date like "5th August 2025 (11pm)"
+    const verbosePattern = /(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)\s+(\d{4})\s*(?:[\(\s]*(\d{1,2})[:.]?(\d{2})?\s*(am|pm)?)?/;
+    let match = text.match(verbosePattern);
+    if (match) {
+      const day = parseInt(match[1]);
+      const monthName = match[2];
+      const year = parseInt(match[3]);
+      let hour = match[4] ? parseInt(match[4]) : 23; // default 11pm
+      let minute = match[5] ? parseInt(match[5]) : 59;
+      const ampm = match[6];
+      const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+      const monthIndex = monthNames.findIndex(m => monthName.startsWith(m));
+      if (monthIndex === -1) return null;
 
-    if (monthIndex === -1) return null;
+      if (ampm === 'pm' && hour < 12) hour += 12;
+      if (ampm === 'am' && hour === 12) hour = 0;
 
-    if (ampm === 'pm' && hour < 12) {
-      hour += 12;
-    }
-    if (ampm === 'am' && hour === 12) { // Midnight case
-      hour = 0;
+      return new Date(year, monthIndex, day, hour, minute, 0);
     }
 
-    return new Date(year, monthIndex, day, hour, minute, 0);
+    // 2) Try to parse numeric date like "05-08-2025 23:00" or "05/08/2025 11pm"
+    const numericPattern = /(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})(?:\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?/;
+    match = text.match(numericPattern);
+    if (match) {
+      const day = parseInt(match[1]);
+      const month = parseInt(match[2]) - 1; // zero-based month
+      const year = parseInt(match[3]);
+      let hour = match[4] ? parseInt(match[4]) : 23;
+      let minute = match[5] ? parseInt(match[5]) : 59;
+      const ampm = match[6];
+
+      if (ampm === 'pm' && hour < 12) hour += 12;
+      if (ampm === 'am' && hour === 12) hour = 0;
+
+      return new Date(year, month, day, hour, minute, 0);
+    }
+
+    // 3) Last fallback: try Date parsing directly (may fail)
+    const parsedDate = new Date(dateString);
+    if (!isNaN(parsedDate.getTime())) {
+      return parsedDate;
+    }
+
+    return null;
+
   } catch (e) {
     console.error(`Error parsing date: "${dateString}"`, e);
     return null;
@@ -1238,21 +1284,11 @@ Good luck with your placements! 💪
 }
 
 /**
- * Clear all scheduled reminders from properties.
- */
-function clearAllReminders() {
-  PropertiesService.getScriptProperties().deleteProperty('PENDING_REMINDERS');
-  console.log('🗑️ All pending reminders have been cleared.');
-  sendTelegramMessage('🗑️ All pending reminders have been cleared.');
-}
-
-
-/**
  * Test the fixed notifier with comprehensive examples
  */
 function testNotifier() {
   console.log('🧪 Testing Fixed VIT CDC Placement Notifier...');
-  clearAllReminders(); // Start with a clean slate
+  clearPendingReminders(); // Start with a clean slate
   
   const testCases = [
      {

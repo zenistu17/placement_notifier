@@ -1,8 +1,9 @@
 // FIXED AI-POWERED VIT CDC EMAIL PARSER V2.0 (with Reminders)
 // Addresses all parsing issues with 100% accuracy and adds automated deadline reminders.
 // ==================== CONFIGURATION ====================
+const userProperties = PropertiesService.getScriptProperties();
 const CONFIG = {
-  TELEGRAM_BOT_TOKEN: '7643526982:AAHwSm6XpPG2VEkJ8WZNfR5XqzgXHTUJPic',
+  TELEGRAM_BOT_TOKEN: userProperties.getProperty('TELEGRAM_BOT_TOKEN'),
   TELEGRAM_CHAT_ID: '@vit_placement_alerts',
   CDC_EMAIL: 'vitianscdc2026@vitstudent.ac.in',
   SEARCH_DAYS: 2,
@@ -744,6 +745,13 @@ function formatVITCDCNotification(info) {
   return message;
 }
 
+/**
+ * Utility function to clear the log of processed message IDs.
+ */
+function clearProcessedIds() {
+  PropertiesService.getScriptProperties().deleteProperty('PROCESSED_MESSAGE_IDS');
+  console.log('✅ Successfully cleared the processed message ID log.');
+}
 
 /**
  * Check if deadline is urgent (within next 2 days)
@@ -1192,9 +1200,8 @@ function setupNotifier() {
   console.log('✅ Trigger created for daily summary: Approx. 11:59 PM daily.');
   // ======================================================================
 
-  
-  // A welcome message for channel subscribers, perfect for a pinned post.
-  const setupMessage = `
+// A welcome message for channel subscribers, perfect for a pinned post.
+const setupMessage = `
 🚀 <b>Welcome to the VIT Placement & Internship Notifier!</b> 🚀
 
 This channel is your automated assistant for all things related to placements at VIT, powered by a bot that instantly forwards updates from the Career Development Centre (CDC).
@@ -1211,11 +1218,13 @@ Never miss an opportunity again! Get critical information delivered directly to 
 
 ⏰ <b>Crucial Deadlines:</b> We highlight the last date for registration for every opportunity.
 
-🔔 <b>AUTOMATIC REMINDERS:</b> Our bot will send you a reminder message <b>6 hours</b> and <b>1 hour</b> before a registration deadline closes!
+🔔 <b>Automatic Reminders:</b> Our bot sends you a reminder message <b>6 hours</b> and <b>1 hour</b> before a registration deadline closes!
 
 ✍️ <b>Test & Interview Schedules:</b> Stay updated on upcoming test dates, times, and venues.
 
 🎉 <b>Selection Results:</b> Find out who got selected as soon as the results are out.
+
+📅 <b>Daily Summary:</b> Get a summary of all placement activities at 11:59 PM every day, so you never lose track.
 
 💡 <b>Pro-Tip:</b> Pin this channel and turn on notifications to ensure you're always ahead!
 
